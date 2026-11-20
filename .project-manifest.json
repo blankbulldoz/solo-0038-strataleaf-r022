@@ -19,7 +19,8 @@
       "同一历史读版本完成分组和数值计算",
       "读后修改受版本前置条件保护",
       "物理完整性与逻辑引用一致性可观察",
-      "外部文档流验证后整批导入"
+      "外部文档流验证后整批导入",
+      "字段级差异订阅可从基线与事件重建所选状态"
     ]
   },
   "project_shape": "backend",
@@ -513,6 +514,24 @@
       "success": "外部文档流验证后整批导入",
       "failure": "重复键整体拒绝",
       "verification": "python3 -m examples.workflows transfer"
+    },
+    {
+      "id": "diff",
+      "name": "字段级差异订阅",
+      "entry": "Database.feed.read_diff",
+      "module_ids": [
+        "feed",
+        "snapshot",
+        "storage"
+      ],
+      "steps": [
+        "输入校验与读取已有事实",
+        "完整变更提交与消费者位置",
+        "形成可观察结果"
+      ],
+      "success": "字段级差异与基线按完整提交交付并可重建",
+      "failure": "确认回退或半条提交拒绝",
+      "verification": "python3 -m examples.workflows diff"
     }
   ],
   "complexity": {

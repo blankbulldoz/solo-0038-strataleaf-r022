@@ -26,6 +26,13 @@ class Diagnostics:
             for pin in connection.execute("SELECT name,rev FROM pins"):
                 if not floor <= pin["rev"] <= head:
                     issues.append("read pin outside retained history: " + pin["name"])
+            for consumer in connection.execute("SELECT * FROM consumers"):
+                if not floor <= consumer["ack"] <= head:
+                    issues.append("consumer position outside retained history: " + consumer["name"])
+                if consumer["fields"] is not None:
+                    if not connection.execute("SELECT 1 FROM collections WHERE name=?",
+                                              (consumer["collection"],)).fetchone():
+                        issues.append("field subscription names an unknown collection: " + consumer["name"])
             if deep:
                 expected = set()
                 for definition in connection.execute("SELECT * FROM index_defs"):

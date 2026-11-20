@@ -40,8 +40,11 @@ class Replication:
                 if body["through"] < head or (body["through"] == head and body["catalog_epoch"] <= int(self.store.get("catalog_epoch"))):
                     return {"revision": head, "applied": 0}
                 for definition in body["collections"]:
-                    connection.execute("INSERT INTO collections VALUES (?,?,?) ON CONFLICT(name) DO UPDATE SET schema=excluded.schema,generation=excluded.generation",
-                                       (definition["name"], definition["schema"], definition["generation"]))
+                    connection.execute("""INSERT INTO collections(name,schema,generation,schema_rev) VALUES (?,?,?,?)
+                                          ON CONFLICT(name) DO UPDATE SET schema=excluded.schema,
+                                          generation=excluded.generation, schema_rev=excluded.schema_rev""",
+                                       (definition["name"], definition["schema"], definition["generation"],
+                                        definition.get("schema_rev", body["through"])))
                 connection.execute("DELETE FROM index_values")
                 connection.execute("DELETE FROM index_defs")
                 for definition in body["indexes"] if body["through"] == body["head"] else []:

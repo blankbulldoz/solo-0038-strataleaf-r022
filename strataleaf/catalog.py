@@ -14,7 +14,8 @@ class Catalog:
         with self.store.atomic(writable=True) as connection:
             if connection.execute("SELECT 1 FROM collections WHERE name=?", (collection,)).fetchone():
                 raise Conflict("collection already exists: " + collection)
-            connection.execute("INSERT INTO collections VALUES (?,?,1)", (collection, dumps(normalized)))
+            connection.execute("INSERT INTO collections(name,schema,generation,schema_rev) VALUES (?,?,1,?)",
+                               (collection, dumps(normalized), self.store.get("head")))
             self.store.set("catalog_epoch", int(self.store.get("catalog_epoch")) + 1)
         return self.describe(collection)
 
@@ -41,7 +42,7 @@ class Catalog:
             for document in visible_rows(connection, collection, int(self.store.get("head"))):
                 validate_document(loads(document["body"]), normalized)
             generation = expected_generation + 1
-            connection.execute("UPDATE collections SET schema=?,generation=? WHERE name=?",
-                               (dumps(normalized), generation, collection))
+            connection.execute("UPDATE collections SET schema=?,generation=?,schema_rev=? WHERE name=?",
+                               (dumps(normalized), generation, self.store.get("head"), collection))
             self.store.set("catalog_epoch", int(self.store.get("catalog_epoch")) + 1)
         return generation

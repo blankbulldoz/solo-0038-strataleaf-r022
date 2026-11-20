@@ -1,8 +1,12 @@
 # 数据与兼容边界
 
-物理表包括 meta、collections、versions、commits、receipts、index_defs、index_values、pins、consumers。versions 的主键为集合、键、修订；body 的 SQL NULL 表示删除，JSON null 只能作为文档字段。collections 保存当前模式；index_values 是当前 head 的投影。commits 保存完整的操作序列；receipts 保存不受历史回收影响的请求摘要与结果。幂等键不能被不同操作复用，回放不重新执行前置条件。
+物理表包括 meta、collections、versions、commits、receipts、index_defs、index_values、pins、consumers。versions 的主键为集合、键、修订；body 的 SQL NULL 表示删除，JSON null 只能作为文档字段。collections 保存当前模式；index_values 是当前 head 的投影。commits 保存完整的操作序列；receipts 保存不受历史回收影响的请求摘要与结果。幂等键不能被不同操作复用，回放不重新执行前置条件。consumers 行同时承载完整流与字段级订阅：`collection`、`fields`、`baseline_rev`、`schema_generation` 为空表示普通消费者，旧库打开时就地补齐这些列。
 
-floor 是仍可读取的最早修订，不代表每条物理版本的最小修订；每个键在 floor 之前的最后版本可能是构造 floor 读视图的基准，必须保留。commits 仅需保存大于 floor 的提交，消费者从自己的 ack 之后读取。pin 与消费者位置不能低于现存 floor。
+floor 是仍可读取的最早修订，不代表每条物理版本的最小修订；每个键在 floor 之前的最后版本可能是构造 floor 读视图的基准，必须保留。commits 仅需保存大于 floor 的提交，消费者从自己的 ack 之后读取。pin 与消费者位置不能低于现存 floor。字段级订阅与普通消费者共用 `ack` 阻挡水位；其基线在投递时按 ack 现算，不额外占用历史，也不需要长期 pin。从窗口中间接入的订阅者把 `since` 设在仍可读取的修订上即可：首次投递的基线正是该修订的所选状态。
+
+字段级差异只在提交粒度成立。每个事件对应一个提交，其中只列该集合的操作；`limit` 统计提交而非操作，因此一个多文档提交不会被拆成两半。事件中 `create`/`delete` 是文档生命周期的绝对描述，`update` 的 `changes` 只含所选字段：缺失变为 `null` 记为 `set`（`after` 为 null），对象字段消失记为 `remove`，数组整体变化记为 `replace`。仅触碰未选字段的提交在事件中表现为空，重建结果不变。重复应用同一事件幂等，因为绝对事件覆盖同名键、`remove` 对缺失路径为空操作。
+
+一次订阅最多选择 64 个点路径，路径集合按深度与字典序规范化；重复路径、空段或互相嵌套的路径（如 `a` 与 `a.b`）在登记时拒绝，避免同一字段被投影两次而差异含义不确定。选择父对象等于选择其全部子字段，子字段后续变化会以子路径的 `add`/`remove`/`set` 表达。
 
 模式包含 fields、required、additional，支持点路径类型；additional=false 限制顶层未知根字段，不递归禁止已声明对象中的子字段。字段不允许 null，除非该字段未声明类型；缺失可通过 required 控制。integer 排除 bool，number 接受整数及有限浮点。JSON 对象不允许非字符串键；浮点必须有限。索引忽略缺失字段与对象/数组，空值作为可索引标量，数值 1 和 1.0 共用索引值，true 与 1 不共用。
 

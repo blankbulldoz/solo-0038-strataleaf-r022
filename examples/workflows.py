@@ -77,6 +77,59 @@ def run(flow):
                 db.feed.acknowledge("mirror", commits[-1]["revision"])
                 output = {"complete_commit": commits, "ack": db.feed.position("mirror"),
                           "backward": rejected(lambda: db.feed.acknowledge("mirror", 0), Conflict)}
+            elif flow == "diff":
+                schema = {"fields": {"label": "string", "meta": "object", "tags": "array"}}
+                db.catalog.create("docs", schema)
+                db.batch().put("docs", "d0", {"label": "a", "meta": {"keep": 1, "drop": 2}, "tags": [1, 2]}) \
+                          .put("docs", "d1", {"label": "b", "meta": {}, "tags": []}).commit()
+                joined = db.batch().put("docs", "d2", {"label": "c", "meta": {"k": 1}, "tags": []}).commit().revision
+                # Register inside the retained window: the first delivery carries the state at `joined`.
+                registered = db.feed.register_diff("reader", "docs", ["label", "meta", "tags"], since=joined)
+                # One commit moves two documents; it must be delivered whole even when limit=1.
+                db.batch().put("docs", "d0", {"label": "a", "meta": {"keep": 1, "blank": None}, "tags": [1, 2, 3]}) \
+                          .put("docs", "d1", {"label": "b", "meta": {"note": "n"}, "tags": []}).commit()
+                db.batch().delete("docs", "d1").commit()
+                first = db.feed.read_diff("reader", limit=1)
+                duplicate = db.feed.read_diff("reader", limit=1)
+                db.feed.acknowledge("reader", first["through"])
+                rest = db.feed.read_diff("reader")
+                # A schema change is announced with a fresh selected baseline.
+                generation = db.catalog.evolve("docs", {**schema, "fields": {**schema["fields"], "note": "string"}},
+                                               db.catalog.describe("docs")["generation"])
+                changed = db.feed.read_diff("reader")
+                rebuilt = db.feed.rebuild("reader")
+                fields = ["label", "meta", "tags"]
+                expected = {item.key: {name: item.document[name] for name in fields if name in item.document}
+                            for item in db.query("docs").records}
+                if rebuilt["documents"] != expected:
+                    raise RuntimeError("rebuilt subscription state differs from current documents")
+                # A consumer joining mid-window after a delete still gets an explainable baseline.
+                db.batch().delete("docs", "d0").commit()
+                db.feed.acknowledge("reader", db.revision)
+                db.retention.compact(db.revision)
+                late_revision = db.batch().put("docs", "d2", {"label": "c", "meta": {"k": 2}, "tags": []}).commit().revision
+                late = db.feed.register_diff("late", "docs", fields, since=late_revision - 1)
+                expected_late = {item.key: {name: item.document[name] for name in fields if name in item.document}
+                                 for item in db.query("docs", revision=late_revision - 1).records}
+                if late["baseline"]["documents"] != expected_late:
+                    raise RuntimeError("late subscription baseline does not match its revision")
+                output = {
+                    "registered_baseline": registered["baseline"]["revision"],
+                    "first_event_revisions": [event["revision"] for event in first["events"]],
+                    "first_operations": len(first["events"][0]["operations"]),
+                    "whole_commit_with_limit_one": first["more"],
+                    "d1_changes": first["events"][0]["operations"][1]["changes"],
+                    "duplicate_delivery": duplicate["events"] == first["events"],
+                    "after_ack": {"events": [event["revision"] for event in rest["events"]],
+                                  "baseline": rest["baseline"]},
+                    "schema_change": {"generation": generation, "changed": changed["schema_changed"],
+                                      "baseline_revision": changed["baseline"]["revision"],
+                                      "fields": sorted(changed["schema"]["schema"]["fields"])},
+                    "rebuilt_documents": rebuilt["documents"],
+                    "rebuild_matches_documents": rebuilt["documents"] == expected,
+                    "late_baseline": late["baseline"],
+                    "reclaimed_backward": rejected(lambda: db.feed.acknowledge("reader", joined - 1), SnapshotTooOld),
+                }
             elif flow == "backup":
                 backup = db.archives.backup(folder / "backup.db")
                 db.batch().delete("segments", "seg_00").commit()

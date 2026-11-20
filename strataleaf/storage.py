@@ -8,7 +8,8 @@ from .errors import DatabaseError, ReadOnly
 
 DDL = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS collections (name TEXT PRIMARY KEY, schema TEXT NOT NULL, generation INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS collections (
+ name TEXT PRIMARY KEY, schema TEXT NOT NULL, generation INTEGER NOT NULL, schema_rev INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS commits (rev INTEGER PRIMARY KEY, payload TEXT NOT NULL, request_key TEXT UNIQUE, request_hash TEXT);
 CREATE TABLE IF NOT EXISTS receipts (request_key TEXT PRIMARY KEY, rev INTEGER NOT NULL, request_hash TEXT NOT NULL, count INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS versions (
@@ -23,8 +24,15 @@ CREATE TABLE IF NOT EXISTS index_values (
  PRIMARY KEY(collection,name,token,key), FOREIGN KEY(collection,name) REFERENCES index_defs(collection,name) ON DELETE CASCADE);
 CREATE INDEX IF NOT EXISTS index_document ON index_values(collection,key);
 CREATE TABLE IF NOT EXISTS pins (name TEXT PRIMARY KEY, rev INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS consumers (name TEXT PRIMARY KEY, ack INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS consumers (
+ name TEXT PRIMARY KEY, ack INTEGER NOT NULL,
+ collection TEXT, fields TEXT, baseline_rev INTEGER, schema_generation INTEGER);
 """
+
+# Columns added after the initial on-disk layout; older files are extended in place.
+CONSUMER_COLUMNS = (("collection", "TEXT"), ("fields", "TEXT"),
+                    ("baseline_rev", "INTEGER"), ("schema_generation", "INTEGER"))
+COLLECTION_COLUMNS = (("schema_rev", "INTEGER NOT NULL DEFAULT 0"),)
 
 
 class Storage:
@@ -38,13 +46,30 @@ class Storage:
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.execute("PRAGMA synchronous=FULL")
         self.connection.executescript(DDL)
+        self._migrate()
         with self.atomic():
             initial = {"format": "1", "head": "0", "floor": "0", "database_id": str(uuid.uuid4()),
-                       "cursor_secret": secrets.token_hex(32), "mode": "primary", "upstream": "", "catalog_epoch": "0"}
+                       "cursor_secret": secrets.token_hex(32), "mode": "primary", "upstream": "",
+                       "catalog_epoch": "0"}
             for key, value in initial.items():
                 self.connection.execute("INSERT OR IGNORE INTO meta VALUES (?,?)", (key, value))
             if self.get("format") != "1":
                 raise DatabaseError("unsupported on-disk format")
+
+    def _migrate(self):
+        with self.atomic():
+            existing = {row[1] for row in self.connection.execute("PRAGMA table_info(consumers)")}
+            for column, kind in CONSUMER_COLUMNS:
+                if column not in existing:
+                    self.connection.execute(f"ALTER TABLE consumers ADD COLUMN {column} {kind}")
+            existing = {row[1] for row in self.connection.execute("PRAGMA table_info(collections)")}
+            for column, kind in COLLECTION_COLUMNS:
+                if column not in existing:
+                    self.connection.execute(f"ALTER TABLE collections ADD COLUMN {column} {kind}")
+                    # A legacy schema change point is unknowable; treat the current head as the
+                    # last change so a subscription is never told the schema is unchanged early.
+                    head = self.connection.execute("SELECT value FROM meta WHERE key='head'").fetchone()
+                    self.connection.execute("UPDATE collections SET schema_rev=?", (int(head[0]) if head else 0,))
 
     def get(self, key):
         row = self.connection.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
